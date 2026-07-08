@@ -96,6 +96,7 @@ type TextEditSession = {
 const strokeWidth = 4
 const handleSize = 8
 const textFontSize = 28
+let textMeasurementContext: CanvasRenderingContext2D | null = null
 
 const tools: Array<{
   id: Tool
@@ -197,12 +198,41 @@ function resizeAnnotation(
   return annotation
 }
 
+function getTextFont(fontSize: number) {
+  return `${fontSize}px system-ui, sans-serif`
+}
+
+function getTextMeasurementContext() {
+  if (!textMeasurementContext && typeof document !== 'undefined') {
+    textMeasurementContext = document.createElement('canvas').getContext('2d')
+  }
+
+  return textMeasurementContext
+}
+
 function getTextBounds(annotation: TextAnnotation) {
+  const context = getTextMeasurementContext()
+  if (!context) {
+    return {
+      x: annotation.position.x,
+      y: annotation.position.y - annotation.fontSize * 0.8,
+      width: Math.max(1, annotation.text.length * annotation.fontSize * 0.58),
+      height: annotation.fontSize,
+    }
+  }
+
+  context.font = getTextFont(annotation.fontSize)
+  const metrics = context.measureText(annotation.text || ' ')
+  const ascent = metrics.actualBoundingBoxAscent || annotation.fontSize * 0.75
+  const descent = metrics.actualBoundingBoxDescent || annotation.fontSize * 0.25
+  const left = metrics.actualBoundingBoxLeft || 0
+  const right = metrics.actualBoundingBoxRight || metrics.width
+
   return {
-    x: annotation.position.x,
-    y: annotation.position.y - annotation.fontSize,
-    width: Math.max(48, annotation.text.length * annotation.fontSize * 0.58),
-    height: annotation.fontSize * 1.2,
+    x: annotation.position.x - left,
+    y: annotation.position.y - ascent,
+    width: Math.max(1, left + right),
+    height: Math.max(1, ascent + descent),
   }
 }
 
@@ -260,10 +290,10 @@ function hitTest(annotation: Annotation, point: Point) {
     const bounds = getTextBounds(annotation)
 
     return (
-      point.x >= bounds.x &&
-      point.x <= bounds.x + bounds.width &&
-      point.y >= bounds.y &&
-      point.y <= bounds.y + bounds.height
+      point.x >= bounds.x - 6 &&
+      point.x <= bounds.x + bounds.width + 6 &&
+      point.y >= bounds.y - 6 &&
+      point.y <= bounds.y + bounds.height + 6
     )
   }
 
@@ -347,7 +377,7 @@ function drawAnnotation(
   }
 
   if (annotation.type === 'text') {
-    context.font = `${annotation.fontSize}px system-ui, sans-serif`
+    context.font = getTextFont(annotation.fontSize)
     context.textBaseline = 'alphabetic'
     context.fillText(annotation.text, annotation.position.x, annotation.position.y)
   }
