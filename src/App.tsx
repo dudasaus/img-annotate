@@ -211,15 +211,6 @@ function getHandles(annotation: Annotation): Point[] {
     return [annotation.start, annotation.end]
   }
 
-  if (annotation.type === 'text') {
-    const bounds = getTextBounds(annotation)
-
-    return [
-      { x: bounds.x, y: bounds.y },
-      { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
-    ]
-  }
-
   return []
 }
 
