@@ -223,16 +223,15 @@ function getTextBounds(annotation: TextAnnotation) {
 
   context.font = getTextFont(annotation.fontSize)
   const metrics = context.measureText(annotation.text || ' ')
-  const ascent = metrics.actualBoundingBoxAscent || annotation.fontSize * 0.75
-  const descent = metrics.actualBoundingBoxDescent || annotation.fontSize * 0.25
   const left = metrics.actualBoundingBoxLeft || 0
   const right = metrics.actualBoundingBoxRight || metrics.width
+  const height = annotation.fontSize * 1.2
 
   return {
     x: annotation.position.x - left,
-    y: annotation.position.y - ascent,
+    y: annotation.position.y - annotation.fontSize * 0.9,
     width: Math.max(1, left + right),
-    height: Math.max(1, ascent + descent),
+    height,
   }
 }
 
