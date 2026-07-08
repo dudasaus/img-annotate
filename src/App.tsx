@@ -1218,49 +1218,51 @@ function App() {
           )}
         >
           {image ? (
-            <div className="relative w-max">
-              <canvas
-                ref={canvasRef}
-                className="block cursor-crosshair bg-white"
-                onDoubleClick={handleCanvasDoubleClick}
-                onPointerDown={handlePointerDown}
-                onPointerMove={handlePointerMove}
-                onPointerUp={handlePointerUp}
-                onPointerCancel={handlePointerUp}
-              />
-              {selectedTextAnnotation &&
-              inlineTextBounds &&
-              textEditSession?.annotationId === selectedTextAnnotation.id ? (
-                <Input
-                  ref={inlineTextRef}
-                  aria-label="Edit canvas text"
-                  className="absolute z-10 h-auto rounded-none border-neutral-950 bg-white px-0 py-0 shadow-none focus-visible:ring-0"
-                  style={{
-                    color: selectedTextAnnotation.color,
-                    fontSize: selectedTextAnnotation.fontSize,
-                    height: inlineTextBounds.height,
-                    left: inlineTextBounds.x,
-                    lineHeight: `${inlineTextBounds.height}px`,
-                    minWidth: 48,
-                    top: inlineTextBounds.y,
-                    width: Math.max(inlineTextBounds.width + 16, 80),
-                  }}
-                  value={selectedTextAnnotation.text}
-                  onBlur={finishInlineTextEdit}
-                  onChange={(event) => updateSelectedText(event.target.value)}
-                  onKeyDown={(event) => {
-                    event.stopPropagation()
-                    if (event.key === 'Enter') {
-                      event.currentTarget.blur()
-                    }
-                    if (event.key === 'Escape') {
-                      event.preventDefault()
-                      revertInlineTextEdit()
-                    }
-                  }}
-                  onPointerDown={(event) => event.stopPropagation()}
+            <div className="grid min-h-full min-w-full place-items-center p-4">
+              <div className="relative w-max">
+                <canvas
+                  ref={canvasRef}
+                  className="block cursor-crosshair bg-white"
+                  onDoubleClick={handleCanvasDoubleClick}
+                  onPointerDown={handlePointerDown}
+                  onPointerMove={handlePointerMove}
+                  onPointerUp={handlePointerUp}
+                  onPointerCancel={handlePointerUp}
                 />
-              ) : null}
+                {selectedTextAnnotation &&
+                inlineTextBounds &&
+                textEditSession?.annotationId === selectedTextAnnotation.id ? (
+                  <Input
+                    ref={inlineTextRef}
+                    aria-label="Edit canvas text"
+                    className="absolute z-10 h-auto rounded-none border-neutral-950 bg-white px-0 py-0 shadow-none focus-visible:ring-0"
+                    style={{
+                      color: selectedTextAnnotation.color,
+                      fontSize: selectedTextAnnotation.fontSize,
+                      height: inlineTextBounds.height,
+                      left: inlineTextBounds.x,
+                      lineHeight: `${inlineTextBounds.height}px`,
+                      minWidth: 48,
+                      top: inlineTextBounds.y,
+                      width: Math.max(inlineTextBounds.width + 16, 80),
+                    }}
+                    value={selectedTextAnnotation.text}
+                    onBlur={finishInlineTextEdit}
+                    onChange={(event) => updateSelectedText(event.target.value)}
+                    onKeyDown={(event) => {
+                      event.stopPropagation()
+                      if (event.key === 'Enter') {
+                        event.currentTarget.blur()
+                      }
+                      if (event.key === 'Escape') {
+                        event.preventDefault()
+                        revertInlineTextEdit()
+                      }
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                  />
+                ) : null}
+              </div>
             </div>
           ) : (
             <div className="flex flex-col items-center gap-3 rounded-md border border-dashed border-neutral-300 bg-white p-6 text-center">
