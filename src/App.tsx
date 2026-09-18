@@ -19,7 +19,6 @@ import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
 import { Label } from './components/ui/label'
 import { Separator } from './components/ui/separator'
-import { cn } from './lib/utils'
 
 type Point = {
   x: number
@@ -446,6 +445,8 @@ function renderImage(
 
 function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const viewportRef = useRef<HTMLDivElement | null>(null)
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
   const inlineTextRef = useRef<HTMLInputElement | null>(null)
   const interactionRef = useRef<Interaction | null>(null)
   const skipTextCommitRef = useRef(false)
@@ -473,6 +474,30 @@ function App() {
   const inlineTextBounds = selectedTextAnnotation
     ? getTextBounds(selectedTextAnnotation)
     : null
+
+  const displayScale = image
+    ? Math.min(
+        1,
+        viewportSize.width / image.naturalWidth,
+        viewportSize.height / image.naturalHeight,
+      )
+    : 1
+
+  useEffect(() => {
+    const viewport = viewportRef.current
+    if (!viewport) {
+      return
+    }
+
+    const observer = new ResizeObserver(([entry]) => {
+      setViewportSize({
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      })
+    })
+    observer.observe(viewport)
+    return () => observer.disconnect()
+  }, [])
 
   const pushHistory = useCallback((previousAnnotations: Annotation[]) => {
     setHistory((current) => [
@@ -1088,8 +1113,8 @@ function App() {
   }, [annotations, image, preview, selectedId, textEditSession?.annotationId])
 
   return (
-    <main className="flex min-h-screen flex-col bg-white text-neutral-950">
-      <header className="flex flex-wrap items-center gap-2 border-b border-neutral-200 px-3 py-2">
+    <main className="flex h-dvh flex-col overflow-hidden bg-white text-neutral-950">
+      <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-neutral-200 px-3 py-2">
         <div className="flex items-center gap-1">
           {tools.map((item) => {
             const Icon = item.icon
@@ -1207,19 +1232,26 @@ function App() {
       </header>
 
       <section className="flex min-h-0 flex-1 flex-col">
-        <div className="border-b border-neutral-200 px-3 py-2 text-sm text-neutral-600">
+        <div className="shrink-0 border-b border-neutral-200 px-3 py-2 text-sm text-neutral-600">
           {message}
         </div>
 
         <div
-          className={cn(
-            'min-h-0 flex-1 overflow-auto bg-neutral-50',
-            !image && 'grid place-items-center',
-          )}
+          ref={viewportRef}
+          className="grid min-h-0 min-w-0 flex-1 place-items-center overflow-hidden bg-neutral-50 p-4"
         >
           {image ? (
-            <div className="grid min-h-full min-w-full place-items-center p-4">
-              <div className="relative w-max">
+            <div
+              className="relative"
+              style={{
+                width: image.naturalWidth * displayScale,
+                height: image.naturalHeight * displayScale,
+              }}
+            >
+              <div
+                className="absolute left-0 top-0 w-max origin-top-left"
+                style={{ transform: `scale(${displayScale})` }}
+              >
                 <canvas
                   ref={canvasRef}
                   className="block cursor-crosshair bg-white"
