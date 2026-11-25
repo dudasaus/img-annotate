@@ -1351,7 +1351,8 @@ function App() {
                         cancelEditing()
                       } else if (
                         event.key === 'Enter' &&
-                        (event.metaKey || event.ctrlKey)
+                        !event.shiftKey &&
+                        !event.nativeEvent.isComposing
                       ) {
                         event.preventDefault()
                         finishEditing()
@@ -1366,7 +1367,7 @@ function App() {
                     top: (editingLayout.y + editingLayout.height) * displayScale + 12,
                   }}
                 >
-                  ⌘↵ done · Esc cancel · ↵ new line
+                  ↵ done · ⇧↵ new line · Esc cancel
                 </div>
               </>
             ) : null}
