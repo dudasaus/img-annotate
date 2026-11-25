@@ -1,8 +1,8 @@
 import {
   ArrowUpRight,
   Circle,
-  ClipboardCopy,
   ClipboardPaste,
+  Copy,
   Download,
   Eraser,
   FolderOpen,
@@ -1019,7 +1019,7 @@ function App() {
   return (
     <main className="flex h-dvh flex-col overflow-hidden bg-white text-neutral-950">
       <header className="flex shrink-0 flex-wrap items-center gap-2 border-b border-neutral-200 px-3 py-2">
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5">
           {tools.map((item) => {
             const Icon = item.icon
 
@@ -1029,6 +1029,7 @@ function App() {
                 type="button"
                 variant={tool === item.id ? 'default' : 'ghost'}
                 size="icon"
+                className="size-8"
                 aria-label={item.label}
                 aria-pressed={tool === item.id}
                 title={`${item.label} (${item.shortcut})`}
@@ -1043,7 +1044,7 @@ function App() {
 
         <Separator className="hidden h-6 w-px sm:block" data-orientation="vertical" />
 
-        <div className="flex items-center gap-1" role="group" aria-label="Color">
+        <div className="flex items-center gap-0.5" role="group" aria-label="Color">
           {swatches.map((swatch) => (
             <button
               key={swatch.color}
@@ -1178,6 +1179,17 @@ function App() {
           >
             <Trash2 />
           </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Clear annotations"
+            title="Clear annotations"
+            disabled={annotations.length === 0}
+            onClick={clearAnnotations}
+          >
+            <Eraser />
+          </Button>
         </div>
 
         <div className="ml-auto flex items-center gap-1">
@@ -1214,30 +1226,21 @@ function App() {
           >
             <ClipboardPaste />
           </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label="Clear annotations"
-            title="Clear annotations"
-            disabled={annotations.length === 0}
-            onClick={clearAnnotations}
-          >
-            <Eraser />
-          </Button>
+          <Separator className="mx-1 h-6 w-px" data-orientation="vertical" />
           <Button
             type="button"
             variant="outline"
-            size="icon"
-            aria-label="Copy image"
-            title="Copy image (⌘C)"
+            className="px-3"
+            title="Copy annotated image (⌘C)"
             disabled={!image}
             onClick={() => void copyImage()}
           >
-            <ClipboardCopy />
+            <Copy />
+            Copy
           </Button>
           <Button
             type="button"
+            className="px-3"
             disabled={!image}
             title="Download (⌘S)"
             onClick={downloadImage}
