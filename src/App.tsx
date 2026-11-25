@@ -4,6 +4,7 @@ import {
   ClipboardCopy,
   ClipboardPaste,
   Download,
+  Eraser,
   Minus,
   MousePointer2,
   Pencil,
@@ -13,466 +14,138 @@ import {
   Type,
   Undo2,
 } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { Button } from './components/ui/button'
-import { Input } from './components/ui/input'
-import { Label } from './components/ui/label'
 import { Separator } from './components/ui/separator'
-
-type Point = {
-  x: number
-  y: number
-}
-
-type Tool = 'select' | 'draw' | 'line' | 'arrow' | 'rectangle' | 'circle' | 'text'
-
-type DrawAnnotation = {
-  id: string
-  type: 'draw'
-  color: string
-  points: Point[]
-}
-
-type LineAnnotation = {
-  id: string
-  type: 'line' | 'arrow'
-  color: string
-  start: Point
-  end: Point
-}
-
-type BoxAnnotation = {
-  id: string
-  type: 'rectangle' | 'circle'
-  color: string
-  start: Point
-  end: Point
-}
-
-type TextAnnotation = {
-  id: string
-  type: 'text'
-  color: string
-  position: Point
-  text: string
-  fontSize: number
-}
-
-type Annotation =
-  | DrawAnnotation
-  | LineAnnotation
-  | BoxAnnotation
-  | TextAnnotation
+import {
+  type Annotation,
+  type DrawAnnotation,
+  type HandleId,
+  type LineAnnotation,
+  type BoxAnnotation,
+  type Point,
+  type SizeOption,
+  type TextAnnotation,
+  type TextStyle,
+  type Tool,
+  constrainPoint,
+  findAnnotationAt,
+  findHandleAt,
+  getContrastColor,
+  getHandleCursor,
+  getSizePresets,
+  getTextFont,
+  getTextLayout,
+  measureText,
+  moveAnnotation,
+  pointDistance,
+  resizeAnnotation,
+} from './lib/annotations'
+import { drawAnnotation, drawHover, drawSelection, renderImage } from './lib/render'
+import {
+  type TextEdit,
+  beginTextEdit,
+  cancelTextEdit,
+  finishTextEdit,
+  updateTextDraft,
+} from './lib/textEditing'
+import { useHistoryStore } from './lib/useHistoryStore'
+import { cn } from './lib/utils'
 
 type Interaction =
-  | {
-      kind: 'draw'
-      annotation: DrawAnnotation
-    }
-  | {
-      kind: 'create'
-      annotation: LineAnnotation | BoxAnnotation
-    }
+  | { kind: 'draw'; annotation: DrawAnnotation }
+  | { kind: 'create'; annotation: LineAnnotation | BoxAnnotation }
   | {
       kind: 'move'
       annotationId: string
       start: Point
-      originalAnnotations: Annotation[]
+      base: Annotation[]
+      moved: boolean
+      editOnClick: boolean
     }
   | {
       kind: 'resize'
       annotationId: string
-      handleIndex: number
-      originalAnnotations: Annotation[]
+      handle: HandleId
+      base: Annotation[]
     }
 
-type TextEditSession = {
-  annotationId: string
-  originalAnnotations: Annotation[]
-}
-
-const strokeWidth = 4
-const handleSize = 8
-const textFontSize = 28
-let textMeasurementContext: CanvasRenderingContext2D | null = null
+/** Hit tolerances, in screen pixels. */
+const hitSlop = 6
+const handleSlop = 10
+const textPlaceholder = 'Type…'
 
 const tools: Array<{
   id: Tool
   label: string
+  shortcut: string
   icon: typeof MousePointer2
 }> = [
-  { id: 'select', label: 'Select', icon: MousePointer2 },
-  { id: 'draw', label: 'Draw', icon: Pencil },
-  { id: 'line', label: 'Line', icon: Minus },
-  { id: 'arrow', label: 'Arrow', icon: ArrowUpRight },
-  { id: 'rectangle', label: 'Rectangle', icon: RectangleHorizontal },
-  { id: 'circle', label: 'Circle', icon: Circle },
-  { id: 'text', label: 'Text', icon: Type },
+  { id: 'select', label: 'Select', shortcut: 'V', icon: MousePointer2 },
+  { id: 'draw', label: 'Draw', shortcut: 'P', icon: Pencil },
+  { id: 'line', label: 'Line', shortcut: 'L', icon: Minus },
+  { id: 'arrow', label: 'Arrow', shortcut: 'A', icon: ArrowUpRight },
+  { id: 'rectangle', label: 'Rectangle', shortcut: 'R', icon: RectangleHorizontal },
+  { id: 'circle', label: 'Ellipse', shortcut: 'O', icon: Circle },
+  { id: 'text', label: 'Text', shortcut: 'T', icon: Type },
 ]
 
-function cloneAnnotations(annotations: Annotation[]) {
-  return structuredClone(annotations) as Annotation[]
-}
+const swatches = [
+  { color: '#ef4444', label: 'Red' },
+  { color: '#f97316', label: 'Orange' },
+  { color: '#facc15', label: 'Yellow' },
+  { color: '#22c55e', label: 'Green' },
+  { color: '#3b82f6', label: 'Blue' },
+  { color: '#a855f7', label: 'Purple' },
+  { color: '#0a0a0a', label: 'Black' },
+  { color: '#ffffff', label: 'White' },
+]
 
-function pointDistance(first: Point, second: Point) {
-  return Math.hypot(first.x - second.x, first.y - second.y)
-}
+const sizeOptions: SizeOption[] = ['S', 'M', 'L']
 
-function distanceToSegment(point: Point, start: Point, end: Point) {
-  const segmentLengthSquared =
-    (end.x - start.x) * (end.x - start.x) +
-    (end.y - start.y) * (end.y - start.y)
-
-  if (segmentLengthSquared === 0) {
-    return pointDistance(point, start)
-  }
-
-  const rawProgress =
-    ((point.x - start.x) * (end.x - start.x) +
-      (point.y - start.y) * (end.y - start.y)) /
-    segmentLengthSquared
-  const progress = Math.max(0, Math.min(1, rawProgress))
-  const projection = {
-    x: start.x + progress * (end.x - start.x),
-    y: start.y + progress * (end.y - start.y),
-  }
-
-  return pointDistance(point, projection)
-}
-
-function getBox(start: Point, end: Point) {
-  return {
-    x: Math.min(start.x, end.x),
-    y: Math.min(start.y, end.y),
-    width: Math.abs(end.x - start.x),
-    height: Math.abs(end.y - start.y),
-  }
-}
-
-function moveAnnotation(annotation: Annotation, delta: Point): Annotation {
-  if (annotation.type === 'draw') {
-    return {
-      ...annotation,
-      points: annotation.points.map((point) => ({
-        x: point.x + delta.x,
-        y: point.y + delta.y,
-      })),
-    }
-  }
-
-  if (annotation.type === 'text') {
-    return {
-      ...annotation,
-      position: {
-        x: annotation.position.x + delta.x,
-        y: annotation.position.y + delta.y,
-      },
-    }
-  }
-
-  return {
-    ...annotation,
-    start: { x: annotation.start.x + delta.x, y: annotation.start.y + delta.y },
-    end: { x: annotation.end.x + delta.x, y: annotation.end.y + delta.y },
-  }
-}
-
-function resizeAnnotation(
-  annotation: Annotation,
-  handleIndex: number,
-  point: Point,
-): Annotation {
-  if (
-    annotation.type === 'line' ||
-    annotation.type === 'arrow' ||
-    annotation.type === 'rectangle' ||
-    annotation.type === 'circle'
-  ) {
-    return handleIndex === 0
-      ? { ...annotation, start: point }
-      : { ...annotation, end: point }
-  }
-
-  return annotation
-}
-
-function getTextFont(fontSize: number) {
-  return `${fontSize}px system-ui, sans-serif`
-}
-
-function getTextMeasurementContext() {
-  if (!textMeasurementContext && typeof document !== 'undefined') {
-    textMeasurementContext = document.createElement('canvas').getContext('2d')
-  }
-
-  return textMeasurementContext
-}
-
-function getTextBounds(annotation: TextAnnotation) {
-  const context = getTextMeasurementContext()
-  if (!context) {
-    return {
-      x: annotation.position.x,
-      y: annotation.position.y - annotation.fontSize * 0.8,
-      width: Math.max(1, annotation.text.length * annotation.fontSize * 0.58),
-      height: annotation.fontSize,
-    }
-  }
-
-  context.font = getTextFont(annotation.fontSize)
-  const metrics = context.measureText(annotation.text || ' ')
-  const left = metrics.actualBoundingBoxLeft || 0
-  const right = metrics.actualBoundingBoxRight || metrics.width
-  const height = annotation.fontSize * 1.2
-
-  return {
-    x: annotation.position.x - left,
-    y: annotation.position.y - annotation.fontSize * 0.9,
-    width: Math.max(1, left + right),
-    height,
-  }
-}
-
-function getHandles(annotation: Annotation): Point[] {
-  if (
-    annotation.type === 'line' ||
-    annotation.type === 'arrow' ||
-    annotation.type === 'rectangle' ||
-    annotation.type === 'circle'
-  ) {
-    return [annotation.start, annotation.end]
-  }
-
-  return []
-}
-
-function hitTest(annotation: Annotation, point: Point) {
-  if (annotation.type === 'draw') {
-    return annotation.points.some((current, index) => {
-      const previous = annotation.points[index - 1]
-      return previous
-        ? distanceToSegment(point, previous, current) <= 10
-        : pointDistance(point, current) <= 10
-    })
-  }
-
-  if (annotation.type === 'line' || annotation.type === 'arrow') {
-    return distanceToSegment(point, annotation.start, annotation.end) <= 10
-  }
-
-  if (annotation.type === 'rectangle') {
-    const box = getBox(annotation.start, annotation.end)
-
-    return (
-      point.x >= box.x - 8 &&
-      point.x <= box.x + box.width + 8 &&
-      point.y >= box.y - 8 &&
-      point.y <= box.y + box.height + 8
-    )
-  }
-
-  if (annotation.type === 'circle') {
-    const box = getBox(annotation.start, annotation.end)
-    const radiusX = Math.max(box.width / 2, 1)
-    const radiusY = Math.max(box.height / 2, 1)
-    const center = { x: box.x + radiusX, y: box.y + radiusY }
-    const normalized =
-      ((point.x - center.x) * (point.x - center.x)) / (radiusX * radiusX) +
-      ((point.y - center.y) * (point.y - center.y)) / (radiusY * radiusY)
-
-    return normalized <= 1.2
-  }
-
-  if (annotation.type === 'text') {
-    const bounds = getTextBounds(annotation)
-
-    return (
-      point.x >= bounds.x - 6 &&
-      point.x <= bounds.x + bounds.width + 6 &&
-      point.y >= bounds.y - 6 &&
-      point.y <= bounds.y + bounds.height + 6
-    )
-  }
-
-  return false
-}
-
-function drawArrowHead(
-  context: CanvasRenderingContext2D,
-  start: Point,
-  end: Point,
-) {
-  const angle = Math.atan2(end.y - start.y, end.x - start.x)
-  const length = 18
-
-  context.beginPath()
-  context.moveTo(end.x, end.y)
-  context.lineTo(
-    end.x - length * Math.cos(angle - Math.PI / 6),
-    end.y - length * Math.sin(angle - Math.PI / 6),
+function nearestSize(value: number, presets: Record<SizeOption, number>) {
+  return sizeOptions.reduce((best, option) =>
+    Math.abs(presets[option] - value) < Math.abs(presets[best] - value)
+      ? option
+      : best,
   )
-  context.moveTo(end.x, end.y)
-  context.lineTo(
-    end.x - length * Math.cos(angle + Math.PI / 6),
-    end.y - length * Math.sin(angle + Math.PI / 6),
-  )
-  context.stroke()
 }
 
-function drawAnnotation(
-  context: CanvasRenderingContext2D,
-  annotation: Annotation,
-) {
-  context.save()
-  context.strokeStyle = annotation.color
-  context.fillStyle = annotation.color
-  context.lineWidth = strokeWidth
-  context.lineCap = 'round'
-  context.lineJoin = 'round'
-
-  if (annotation.type === 'draw') {
-    context.beginPath()
-    annotation.points.forEach((point, index) => {
-      if (index === 0) {
-        context.moveTo(point.x, point.y)
-      } else {
-        context.lineTo(point.x, point.y)
-      }
-    })
-    context.stroke()
-  }
-
-  if (annotation.type === 'line' || annotation.type === 'arrow') {
-    context.beginPath()
-    context.moveTo(annotation.start.x, annotation.start.y)
-    context.lineTo(annotation.end.x, annotation.end.y)
-    context.stroke()
-
-    if (annotation.type === 'arrow') {
-      drawArrowHead(context, annotation.start, annotation.end)
-    }
-  }
-
-  if (annotation.type === 'rectangle') {
-    const box = getBox(annotation.start, annotation.end)
-    context.strokeRect(box.x, box.y, box.width, box.height)
-  }
-
-  if (annotation.type === 'circle') {
-    const box = getBox(annotation.start, annotation.end)
-    context.beginPath()
-    context.ellipse(
-      box.x + box.width / 2,
-      box.y + box.height / 2,
-      Math.max(box.width / 2, 1),
-      Math.max(box.height / 2, 1),
-      0,
-      0,
-      Math.PI * 2,
-    )
-    context.stroke()
-  }
-
-  if (annotation.type === 'text') {
-    context.font = getTextFont(annotation.fontSize)
-    context.textBaseline = 'alphabetic'
-    context.fillText(annotation.text, annotation.position.x, annotation.position.y)
-  }
-
-  context.restore()
-}
-
-function drawSelection(
-  context: CanvasRenderingContext2D,
-  annotation: Annotation,
-) {
-  context.save()
-  context.strokeStyle = '#0a0a0a'
-  context.fillStyle = '#ffffff'
-  context.lineWidth = 1
-  context.setLineDash([6, 4])
-
-  if (annotation.type === 'text') {
-    const bounds = getTextBounds(annotation)
-    context.strokeRect(bounds.x, bounds.y, bounds.width, bounds.height)
-  } else if (annotation.type === 'rectangle' || annotation.type === 'circle') {
-    const box = getBox(annotation.start, annotation.end)
-    context.strokeRect(box.x, box.y, box.width, box.height)
-  }
-
-  context.setLineDash([])
-  getHandles(annotation).forEach((point) => {
-    context.fillRect(
-      point.x - handleSize / 2,
-      point.y - handleSize / 2,
-      handleSize,
-      handleSize,
-    )
-    context.strokeRect(
-      point.x - handleSize / 2,
-      point.y - handleSize / 2,
-      handleSize,
-      handleSize,
-    )
-  })
-
-  context.restore()
-}
-
-function renderImage(
-  image: HTMLImageElement,
-  annotations: Annotation[],
-  preview?: Annotation | null,
-) {
-  const canvas = document.createElement('canvas')
-  canvas.width = image.naturalWidth
-  canvas.height = image.naturalHeight
-
-  const context = canvas.getContext('2d')
-  if (!context) {
-    throw new Error('Could not render image.')
-  }
-
-  context.drawImage(image, 0, 0)
-  annotations.forEach((annotation) => drawAnnotation(context, annotation))
-  if (preview) {
-    drawAnnotation(context, preview)
-  }
-
-  return canvas
-}
+/** Keeps toolbar clicks from stealing focus from the inline text editor. */
+const keepFocus = (event: React.MouseEvent) => event.preventDefault()
 
 function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const viewportRef = useRef<HTMLDivElement | null>(null)
-  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
-  const inlineTextRef = useRef<HTMLInputElement | null>(null)
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const interactionRef = useRef<Interaction | null>(null)
-  const skipTextCommitRef = useRef(false)
-  const [imageSrc, setImageSrc] = useState<string | null>(null)
+  const textEditRef = useRef<TextEdit | null>(null)
+
+  const { state: history, dispatch, read } = useHistoryStore<Annotation[]>([])
+  const annotations = history.present
+
+  const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
   const [image, setImage] = useState<HTMLImageElement | null>(null)
-  const [annotations, setAnnotations] = useState<Annotation[]>([])
-  const [history, setHistory] = useState<Annotation[][]>([])
-  const [redoStack, setRedoStack] = useState<Annotation[][]>([])
   const [preview, setPreview] = useState<Annotation | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [hoveredId, setHoveredId] = useState<string | null>(null)
+  const [cursor, setCursor] = useState('default')
+  const [textEdit, setTextEditState] = useState<TextEdit | null>(null)
   const [tool, setTool] = useState<Tool>('select')
-  const [color, setColor] = useState('#ef4444')
-  const [message, setMessage] = useState('Paste an image to start.')
-  const [textEditSession, setTextEditSession] =
-    useState<TextEditSession | null>(null)
+  const [color, setColor] = useState(swatches[0].color)
+  const [strokeSize, setStrokeSize] = useState<SizeOption>('M')
+  const [textSize, setTextSize] = useState<SizeOption>('M')
+  const [textStyle, setTextStyle] = useState<TextStyle>('outline')
+  const [message, setMessage] = useState<string | null>(null)
 
-  const selectedAnnotation = useMemo(
-    () => annotations.find((annotation) => annotation.id === selectedId) ?? null,
-    [annotations, selectedId],
-  )
+  const setTextEdit = useCallback((next: TextEdit | null) => {
+    textEditRef.current = next
+    setTextEditState(next)
+  }, [])
 
-  const selectedTextAnnotation =
-    selectedAnnotation?.type === 'text' ? selectedAnnotation : null
-
-  const inlineTextBounds = selectedTextAnnotation
-    ? getTextBounds(selectedTextAnnotation)
+  const presets = image
+    ? getSizePresets(image.naturalWidth, image.naturalHeight)
     : null
 
   const displayScale = image
@@ -480,8 +153,20 @@ function App() {
         1,
         viewportSize.width / image.naturalWidth,
         viewportSize.height / image.naturalHeight,
-      )
+      ) || 1
     : 1
+  /** One screen pixel, in image coordinates. */
+  const pixel = 1 / displayScale
+
+  const selectedAnnotation =
+    annotations.find((annotation) => annotation.id === selectedId) ?? null
+  const editingAnnotation =
+    textEdit &&
+    (annotations.find(
+      (annotation) => annotation.id === textEdit.id && annotation.type === 'text',
+    ) as TextAnnotation | undefined)
+  const isTextContext = tool === 'text' || selectedAnnotation?.type === 'text'
+  const activeSize = isTextContext ? textSize : strokeSize
 
   useEffect(() => {
     const viewport = viewportRef.current
@@ -499,89 +184,159 @@ function App() {
     return () => observer.disconnect()
   }, [])
 
-  const pushHistory = useCallback((previousAnnotations: Annotation[]) => {
-    setHistory((current) => [
-      ...current.slice(-99),
-      cloneAnnotations(previousAnnotations),
-    ])
-    setRedoStack([])
-  }, [])
+  const current = useCallback(() => read().present, [read])
 
-  const commitAnnotations = useCallback(
-    (nextAnnotations: Annotation[], previousAnnotations = annotations) => {
-      pushHistory(previousAnnotations)
-      setAnnotations(cloneAnnotations(nextAnnotations))
+  const finishEditing = useCallback(() => {
+    const edit = textEditRef.current
+    if (!edit) {
+      return
+    }
+
+    dispatch(finishTextEdit(current(), edit))
+    setTextEdit(null)
+    setSelectedId(null)
+  }, [current, dispatch, setTextEdit])
+
+  const cancelEditing = useCallback(() => {
+    const edit = textEditRef.current
+    if (!edit) {
+      return
+    }
+
+    dispatch(cancelTextEdit(edit))
+    setTextEdit(null)
+    setSelectedId(
+      edit.base.some((annotation) => annotation.id === edit.id) ? edit.id : null,
+    )
+  }, [dispatch, setTextEdit])
+
+  const startEditing = useCallback(
+    (annotation: TextAnnotation) => {
+      if (textEditRef.current?.id === annotation.id) {
+        return
+      }
+
+      finishEditing()
+      const { edit, action } = beginTextEdit(current(), annotation)
+      dispatch(action)
+      setTextEdit(edit)
+      setSelectedId(annotation.id)
     },
-    [annotations, pushHistory],
+    [current, dispatch, finishEditing, setTextEdit],
   )
 
-  const startInlineTextEdit = useCallback(
-    (annotationId: string, originalAnnotations = annotations) => {
-      setSelectedId(annotationId)
-      setTool('select')
-      setTextEditSession((current) =>
-        current?.annotationId === annotationId
-          ? current
-          : {
-              annotationId,
-              originalAnnotations: cloneAnnotations(originalAnnotations),
-            },
+  const syncStyleFrom = useCallback(
+    (annotation: Annotation) => {
+      setColor(annotation.color)
+      if (!presets) {
+        return
+      }
+
+      if (annotation.type === 'text') {
+        setTextSize(nearestSize(annotation.fontSize, presets.font))
+        setTextStyle(annotation.style)
+      } else {
+        setStrokeSize(nearestSize(annotation.strokeWidth, presets.stroke))
+      }
+    },
+    [presets],
+  )
+
+  const selectTool = useCallback(
+    (next: Tool) => {
+      finishEditing()
+      setTool(next)
+    },
+    [finishEditing],
+  )
+
+  /** Applies a style change to the selected annotation, if any. */
+  const updateSelected = useCallback(
+    (
+      patch: (annotation: Annotation) => Annotation,
+      options: { coalesce?: string } = {},
+    ) => {
+      const id = textEditRef.current?.id ?? selectedId
+      if (!id) {
+        return
+      }
+
+      const next = current().map((annotation) =>
+        annotation.id === id ? patch(annotation) : annotation,
+      )
+
+      if (textEditRef.current?.id === id) {
+        dispatch({ type: 'set', value: next })
+      } else {
+        dispatch({
+          type: 'commit',
+          value: next,
+          coalesce: options.coalesce && `${options.coalesce}:${id}`,
+        })
+      }
+    },
+    [current, dispatch, selectedId],
+  )
+
+  const changeColor = useCallback(
+    (nextColor: string, options: { coalesce?: string } = {}) => {
+      setColor(nextColor)
+      updateSelected((annotation) => ({ ...annotation, color: nextColor }), options)
+    },
+    [updateSelected],
+  )
+
+  const changeSize = useCallback(
+    (size: SizeOption) => {
+      if (!presets) {
+        return
+      }
+
+      if (isTextContext) {
+        setTextSize(size)
+      } else {
+        setStrokeSize(size)
+      }
+
+      updateSelected((annotation) =>
+        annotation.type === 'text'
+          ? { ...annotation, fontSize: presets.font[size] }
+          : { ...annotation, strokeWidth: presets.stroke[size] },
       )
     },
-    [annotations],
+    [isTextContext, presets, updateSelected],
   )
 
-  const finishInlineTextEdit = useCallback(() => {
-    if (!textEditSession) {
-      return
-    }
+  const changeTextStyle = useCallback(
+    (style: TextStyle) => {
+      setTextStyle(style)
+      updateSelected((annotation) =>
+        annotation.type === 'text' ? { ...annotation, style } : annotation,
+      )
+    },
+    [updateSelected],
+  )
 
-    if (skipTextCommitRef.current) {
-      skipTextCommitRef.current = false
-      setTextEditSession(null)
-      return
-    }
-
-    const changed =
-      JSON.stringify(textEditSession.originalAnnotations) !==
-      JSON.stringify(annotations)
-    if (changed) {
-      pushHistory(textEditSession.originalAnnotations)
-    }
-    setTextEditSession(null)
-  }, [annotations, pushHistory, textEditSession])
-
-  const revertInlineTextEdit = useCallback(() => {
-    if (!textEditSession) {
-      return
-    }
-
-    skipTextCommitRef.current = true
-    setAnnotations(cloneAnnotations(textEditSession.originalAnnotations))
-    setTextEditSession(null)
-  }, [textEditSession])
-
-  const loadImageBlob = useCallback((blob: Blob) => {
-    const reader = new FileReader()
-
-    reader.onload = () => {
-      setImageSrc(String(reader.result))
-      setAnnotations([])
-      setHistory([])
-      setRedoStack([])
-      setPreview(null)
-      setSelectedId(null)
-      setTextEditSession(null)
-      setTool('select')
-      setMessage('Image ready.')
-    }
-
-    reader.readAsDataURL(blob)
-  }, [])
+  const loadImageBlob = useCallback(
+    (blob: Blob) => {
+      const url = URL.createObjectURL(blob)
+      const nextImage = new Image()
+      nextImage.onload = () => {
+        setTextEdit(null)
+        setImage(nextImage)
+        dispatch({ type: 'reset', value: [] })
+        setPreview(null)
+        setSelectedId(null)
+      }
+      nextImage.onerror = () => setMessage('Could not read that image.')
+      nextImage.src = url
+    },
+    [dispatch, setTextEdit],
+  )
 
   const pasteFromClipboard = useCallback(async () => {
     if (!navigator.clipboard?.read) {
-      setMessage('Use the browser paste shortcut to paste an image.')
+      setMessage('Press ⌘V to paste an image.')
       return
     }
 
@@ -596,160 +351,77 @@ function App() {
       }
       setMessage('Clipboard does not contain an image.')
     } catch {
-      setMessage('Clipboard image access was blocked.')
+      setMessage('Clipboard access was blocked. Press ⌘V instead.')
     }
   }, [loadImageBlob])
 
   const undo = useCallback(() => {
-    setHistory((currentHistory) => {
-      const previous = currentHistory.at(-1)
-      if (!previous) {
-        return currentHistory
-      }
-
-      setRedoStack((currentRedo) => [
-        cloneAnnotations(annotations),
-        ...currentRedo,
-      ])
-      setAnnotations(cloneAnnotations(previous))
-      setSelectedId(null)
-      setTextEditSession(null)
-
-      return currentHistory.slice(0, -1)
-    })
-  }, [annotations])
+    finishEditing()
+    dispatch({ type: 'undo' })
+    setSelectedId(null)
+  }, [dispatch, finishEditing])
 
   const redo = useCallback(() => {
-    setRedoStack((currentRedo) => {
-      const next = currentRedo[0]
-      if (!next) {
-        return currentRedo
-      }
-
-      setHistory((currentHistory) => [
-        ...currentHistory,
-        cloneAnnotations(annotations),
-      ])
-      setAnnotations(cloneAnnotations(next))
-      setSelectedId(null)
-      setTextEditSession(null)
-
-      return currentRedo.slice(1)
-    })
-  }, [annotations])
+    finishEditing()
+    dispatch({ type: 'redo' })
+    setSelectedId(null)
+  }, [dispatch, finishEditing])
 
   const deleteSelected = useCallback(() => {
     if (!selectedId) {
       return
     }
 
-    commitAnnotations(
-      annotations.filter((annotation) => annotation.id !== selectedId),
-    )
+    dispatch({
+      type: 'commit',
+      value: current().filter((annotation) => annotation.id !== selectedId),
+    })
     setSelectedId(null)
-    setTextEditSession(null)
-  }, [annotations, commitAnnotations, selectedId])
-
-  const updateSelectedColor = useCallback(
-    (nextColor: string) => {
-      setColor(nextColor)
-      if (!selectedId) {
-        return
-      }
-
-      commitAnnotations(
-        annotations.map((annotation) =>
-          annotation.id === selectedId
-            ? { ...annotation, color: nextColor }
-            : annotation,
-        ),
-      )
-    },
-    [annotations, commitAnnotations, selectedId],
-  )
-
-  const updateSelectedText = useCallback(
-    (text: string) => {
-      if (!selectedId) {
-        return
-      }
-
-      if (textEditSession?.annotationId === selectedId) {
-        setAnnotations(
-          annotations.map((annotation) =>
-            annotation.id === selectedId && annotation.type === 'text'
-              ? { ...annotation, text }
-              : annotation,
-          ),
-        )
-        return
-      }
-
-      commitAnnotations(
-        annotations.map((annotation) =>
-          annotation.id === selectedId && annotation.type === 'text'
-            ? { ...annotation, text }
-            : annotation,
-        ),
-      )
-    },
-    [annotations, commitAnnotations, selectedId, textEditSession],
-  )
+  }, [current, dispatch, selectedId])
 
   const copyImage = useCallback(async () => {
     if (!image) {
-      setMessage('Paste an image first.')
       return
     }
 
     if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
-      setMessage('Clipboard image copy is not available in this browser.')
+      setMessage('Copying images is not supported in this browser.')
       return
     }
 
+    finishEditing()
     try {
-      const canvas = renderImage(image, annotations)
-      const blob = await new Promise<Blob | null>((resolve) =>
-        canvas.toBlob(resolve, 'image/png'),
+      const blob = new Promise<Blob>((resolve, reject) =>
+        renderImage(image, current(), measureText).toBlob(
+          (result) => (result ? resolve(result) : reject(new Error('render'))),
+          'image/png',
+        ),
       )
-
-      if (!blob) {
-        setMessage('Could not render image.')
-        return
-      }
-
-      await navigator.clipboard.write([
-        new ClipboardItem({ [blob.type]: blob }),
-      ])
-      setMessage('Copied annotated image.')
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+      setMessage('Copied to clipboard.')
     } catch {
       setMessage('Clipboard copy was blocked.')
     }
-  }, [annotations, image])
+  }, [current, finishEditing, image])
 
   const downloadImage = useCallback(() => {
     if (!image) {
-      setMessage('Paste an image first.')
       return
     }
 
-    const canvas = renderImage(image, annotations)
+    finishEditing()
     const link = document.createElement('a')
-    link.href = canvas.toDataURL('image/png')
+    link.href = renderImage(image, current(), measureText).toDataURL('image/png')
     link.download = 'annotated-image.png'
     link.click()
-    setMessage('Downloaded annotated image.')
-  }, [annotations, image])
+    setMessage('Saved annotated-image.png.')
+  }, [current, finishEditing, image])
 
   const clearAnnotations = useCallback(() => {
-    if (annotations.length === 0) {
-      return
-    }
-
-    commitAnnotations([])
+    finishEditing()
+    dispatch({ type: 'commit', value: [] })
     setSelectedId(null)
-    setTextEditSession(null)
-  }, [annotations, commitAnnotations])
+  }, [dispatch, finishEditing])
 
   const getCanvasPoint = useCallback(
     (clientX: number, clientY: number): Point | null => {
@@ -767,69 +439,107 @@ function App() {
     [image],
   )
 
+  const findTextAt = useCallback(
+    (point: Point) =>
+      findAnnotationAt(
+        current().filter((annotation) => annotation.type === 'text'),
+        point,
+        hitSlop * pixel,
+        measureText,
+      ) as TextAnnotation | null,
+    [current, pixel],
+  )
+
   const handlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
-      if (!image) {
+      const point = getCanvasPoint(event.clientX, event.clientY)
+      if (!point || !presets || event.button !== 0) {
         return
       }
 
-      const point = getCanvasPoint(event.clientX, event.clientY)
-      if (!point) {
+      if (textEditRef.current) {
+        // One click just finishes the current text; the next one acts.
+        event.preventDefault()
+        finishEditing()
         return
       }
 
       event.currentTarget.setPointerCapture(event.pointerId)
+      const annotationsNow = current()
+      const selected =
+        annotationsNow.find((annotation) => annotation.id === selectedId) ?? null
 
-      if (tool === 'select') {
-        const selected = selectedAnnotation
-        const handleIndex = selected
-          ? getHandles(selected).findIndex(
-              (handle) => pointDistance(handle, point) <= 12,
-            )
-          : -1
-
-        if (
-          selected &&
-          handleIndex >= 0 &&
-          selected.type !== 'draw' &&
-          selected.type !== 'text'
-        ) {
-          interactionRef.current = {
-            kind: 'resize',
-            annotationId: selected.id,
-            handleIndex,
-            originalAnnotations: cloneAnnotations(annotations),
-          }
-          return
+      const handle = findHandleAt(selected, point, handleSlop * pixel, measureText)
+      if (selected && handle) {
+        interactionRef.current = {
+          kind: 'resize',
+          annotationId: selected.id,
+          handle: handle.id,
+          base: annotationsNow,
         }
-
-        const hit = [...annotations]
-          .reverse()
-          .find((annotation) => hitTest(annotation, point))
-
-        if (hit) {
-          setSelectedId(hit.id)
-          setColor(hit.color)
-          interactionRef.current = {
-            kind: 'move',
-            annotationId: hit.id,
-            start: point,
-            originalAnnotations: cloneAnnotations(annotations),
-          }
-        } else {
-          setSelectedId(null)
-        }
-
         return
       }
 
+      if (tool === 'select') {
+        const hit = findAnnotationAt(annotationsNow, point, hitSlop * pixel, measureText)
+        if (!hit) {
+          setSelectedId(null)
+          return
+        }
+
+        setSelectedId(hit.id)
+        syncStyleFrom(hit)
+        interactionRef.current = {
+          kind: 'move',
+          annotationId: hit.id,
+          start: point,
+          base: annotationsNow,
+          moved: false,
+          editOnClick: hit.type === 'text' && hit.id === selectedId,
+        }
+        return
+      }
+
+      if (tool === 'text') {
+        event.preventDefault()
+        const hit = findTextAt(point)
+        if (hit) {
+          syncStyleFrom(hit)
+          startEditing(hit)
+          return
+        }
+
+        const fontSize = presets.font[textSize]
+        const draft: TextAnnotation = {
+          id: crypto.randomUUID(),
+          type: 'text',
+          color,
+          position: { x: 0, y: 0 },
+          text: '',
+          fontSize,
+          style: textStyle,
+        }
+        const layout = getTextLayout(draft, measureText)
+        startEditing({
+          ...draft,
+          position: {
+            x: point.x - layout.padding,
+            y: point.y - layout.padding - layout.lineHeight / 2,
+          },
+        })
+        return
+      }
+
+      setSelectedId(null)
       const id = crypto.randomUUID()
+      const strokeWidth = presets.stroke[strokeSize]
 
       if (tool === 'draw') {
         const annotation: DrawAnnotation = {
           id,
           type: 'draw',
           color,
+          strokeWidth,
           points: [point],
         }
         interactionRef.current = { kind: 'draw', annotation }
@@ -837,50 +547,78 @@ function App() {
         return
       }
 
-      if (tool === 'text') {
-        const annotation: TextAnnotation = {
-          id,
-          type: 'text',
-          color,
-          position: point,
-          text: 'Text',
-          fontSize: textFontSize,
-        }
-        const nextAnnotations = [...annotations, annotation]
-        commitAnnotations(nextAnnotations)
-        setSelectedId(id)
-        startInlineTextEdit(id, nextAnnotations)
-        return
-      }
-
       const annotation: LineAnnotation | BoxAnnotation = {
         id,
         type: tool,
         color,
+        strokeWidth,
         start: point,
         end: point,
-      }
+      } as LineAnnotation | BoxAnnotation
       interactionRef.current = { kind: 'create', annotation }
       setPreview(annotation)
     },
     [
-      annotations,
       color,
-      commitAnnotations,
+      current,
+      findTextAt,
+      finishEditing,
       getCanvasPoint,
-      image,
-      selectedAnnotation,
-      startInlineTextEdit,
+      pixel,
+      presets,
+      selectedId,
+      startEditing,
+      strokeSize,
+      syncStyleFrom,
+      textSize,
+      textStyle,
       tool,
     ],
+  )
+
+  const updateHover = useCallback(
+    (point: Point) => {
+      const annotationsNow = current()
+      const selected =
+        annotationsNow.find((annotation) => annotation.id === selectedId) ?? null
+      const handle = findHandleAt(selected, point, handleSlop * pixel, measureText)
+
+      if (handle) {
+        setCursor(getHandleCursor(handle.id))
+        setHoveredId(null)
+        return
+      }
+
+      if (tool === 'select') {
+        const hit = findAnnotationAt(annotationsNow, point, hitSlop * pixel, measureText)
+        setHoveredId(hit && hit.id !== selectedId ? hit.id : null)
+        setCursor(hit ? 'move' : 'default')
+        return
+      }
+
+      if (tool === 'text') {
+        const hit = findTextAt(point)
+        setHoveredId(hit?.id ?? null)
+        setCursor('text')
+        return
+      }
+
+      setHoveredId(null)
+      setCursor('crosshair')
+    },
+    [current, findTextAt, pixel, selectedId, tool],
   )
 
   const handlePointerMove = useCallback(
     (event: React.PointerEvent<HTMLCanvasElement>) => {
       const point = getCanvasPoint(event.clientX, event.clientY)
       const interaction = interactionRef.current
+      if (!point) {
+        return
+      }
 
-      if (!point || !interaction) {
+      if (!interaction) {
+        updateHover(point)
         return
       }
 
@@ -895,117 +633,117 @@ function App() {
       }
 
       if (interaction.kind === 'create') {
-        const next = { ...interaction.annotation, end: point }
+        const { annotation } = interaction
+        const end = event.shiftKey
+          ? constrainPoint(
+              annotation.start,
+              point,
+              annotation.type === 'line' || annotation.type === 'arrow'
+                ? 'angle'
+                : 'square',
+            )
+          : point
+        const next = { ...annotation, end }
         interactionRef.current = { kind: 'create', annotation: next }
         setPreview(next)
         return
       }
 
       if (interaction.kind === 'move') {
-        const delta = {
+        let delta = {
           x: point.x - interaction.start.x,
           y: point.y - interaction.start.y,
         }
-        setAnnotations(
-          interaction.originalAnnotations.map((annotation) =>
+        if (!interaction.moved && Math.hypot(delta.x, delta.y) < 3 * pixel) {
+          return
+        }
+        interaction.moved = true
+
+        if (event.shiftKey) {
+          delta =
+            Math.abs(delta.x) > Math.abs(delta.y)
+              ? { x: delta.x, y: 0 }
+              : { x: 0, y: delta.y }
+        }
+
+        dispatch({
+          type: 'set',
+          value: interaction.base.map((annotation) =>
             annotation.id === interaction.annotationId
               ? moveAnnotation(annotation, delta)
               : annotation,
           ),
-        )
+        })
         return
       }
 
-      setAnnotations(
-        interaction.originalAnnotations.map((annotation) =>
+      dispatch({
+        type: 'set',
+        value: interaction.base.map((annotation) =>
           annotation.id === interaction.annotationId
-            ? resizeAnnotation(annotation, interaction.handleIndex, point)
+            ? resizeAnnotation(annotation, interaction.handle, point, {
+                measure: measureText,
+                constrain: event.shiftKey,
+              })
             : annotation,
         ),
-      )
+      })
     },
-    [getCanvasPoint],
-  )
-
-  const handleCanvasDoubleClick = useCallback(
-    (event: React.MouseEvent<HTMLCanvasElement>) => {
-      if (tool !== 'select') {
-        return
-      }
-
-      const point = getCanvasPoint(event.clientX, event.clientY)
-      if (!point) {
-        return
-      }
-
-      const hit = [...annotations]
-        .reverse()
-        .find(
-          (annotation) =>
-            annotation.type === 'text' && hitTest(annotation, point),
-        )
-
-      if (hit?.type === 'text') {
-        startInlineTextEdit(hit.id, annotations)
-      }
-    },
-    [annotations, getCanvasPoint, startInlineTextEdit, tool],
+    [dispatch, getCanvasPoint, pixel, updateHover],
   )
 
   const handlePointerUp = useCallback(() => {
     const interaction = interactionRef.current
-
+    interactionRef.current = null
     if (!interaction) {
       return
     }
 
-    if (interaction.kind === 'draw') {
-      if (interaction.annotation.points.length > 1) {
-        commitAnnotations([...annotations, interaction.annotation])
-        setSelectedId(interaction.annotation.id)
+    if (interaction.kind === 'draw' || interaction.kind === 'create') {
+      const { annotation } = interaction
+      const isBigEnough =
+        annotation.type === 'draw'
+          ? annotation.points.length > 1
+          : pointDistance(annotation.start, annotation.end) > 3 * pixel
+
+      if (isBigEnough) {
+        dispatch({ type: 'commit', value: [...current(), annotation] })
+        setSelectedId(annotation.id)
       }
       setPreview(null)
-      interactionRef.current = null
       return
     }
 
-    if (interaction.kind === 'create') {
-      if (pointDistance(interaction.annotation.start, interaction.annotation.end) > 4) {
-        commitAnnotations([...annotations, interaction.annotation])
-        setSelectedId(interaction.annotation.id)
+    if (interaction.kind === 'move' && !interaction.moved) {
+      const hit = current().find(
+        (annotation) => annotation.id === interaction.annotationId,
+      )
+      if (interaction.editOnClick && hit?.type === 'text') {
+        startEditing(hit)
       }
-      setPreview(null)
-      interactionRef.current = null
       return
     }
 
-    const changed =
-      JSON.stringify(interaction.originalAnnotations) !==
-      JSON.stringify(annotations)
-    if (changed) {
-      pushHistory(interaction.originalAnnotations)
-    }
-    interactionRef.current = null
-  }, [annotations, commitAnnotations, pushHistory])
+    dispatch({ type: 'commit', value: current(), base: interaction.base })
+  }, [current, dispatch, pixel, startEditing])
 
-  useEffect(() => {
-    if (!imageSrc) {
-      setImage(null)
-      return
-    }
-
-    const nextImage = new Image()
-    nextImage.onload = () => setImage(nextImage)
-    nextImage.src = imageSrc
-  }, [imageSrc])
+  const handleDoubleClick = useCallback(
+    (event: React.MouseEvent<HTMLCanvasElement>) => {
+      const point = getCanvasPoint(event.clientX, event.clientY)
+      const hit = point && findTextAt(point)
+      if (hit) {
+        syncStyleFrom(hit)
+        startEditing(hit)
+      }
+    },
+    [findTextAt, getCanvasPoint, startEditing, syncStyleFrom],
+  )
 
   useEffect(() => {
     const onPaste = (event: ClipboardEvent) => {
-      const item = Array.from(event.clipboardData?.items ?? []).find((entry) =>
-        entry.type.startsWith('image/'),
-      )
-
-      const file = item?.getAsFile()
+      const file = Array.from(event.clipboardData?.items ?? [])
+        .find((entry) => entry.type.startsWith('image/'))
+        ?.getAsFile()
       if (!file) {
         return
       }
@@ -1015,102 +753,110 @@ function App() {
     }
 
     window.addEventListener('paste', onPaste)
-
     return () => window.removeEventListener('paste', onPaste)
   }, [loadImageBlob])
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      const modifier = event.metaKey || event.ctrlKey
       const target = event.target
-      const isTextInput =
+      if (
         target instanceof HTMLInputElement ||
         target instanceof HTMLTextAreaElement
-
-      if (isTextInput) {
+      ) {
         return
       }
 
-      if (modifier && event.key.toLowerCase() === 'z') {
+      const modifier = event.metaKey || event.ctrlKey
+      const key = event.key.toLowerCase()
+
+      if (modifier && key === 'z') {
         event.preventDefault()
         if (event.shiftKey) {
           redo()
         } else {
           undo()
         }
-      }
-
-      if (modifier && event.key.toLowerCase() === 'y') {
+      } else if (modifier && key === 'y') {
         event.preventDefault()
         redo()
-      }
-
-      if (event.key === 'Delete' || event.key === 'Backspace') {
+      } else if (event.key === 'Delete' || event.key === 'Backspace') {
+        event.preventDefault()
         deleteSelected()
       }
     }
 
     window.addEventListener('keydown', onKeyDown)
-
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [deleteSelected, redo, undo])
 
-  useEffect(() => {
-    if (!textEditSession?.annotationId || !inlineTextRef.current) {
+  const editingId = textEdit?.id
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current
+    if (!editingId || !textarea) {
       return
     }
 
-    inlineTextRef.current.focus()
-    if (inlineTextRef.current.value === 'Text') {
-      inlineTextRef.current.select()
-      return
-    }
-
-    const end = inlineTextRef.current.value.length
-    inlineTextRef.current.setSelectionRange(end, end)
-  }, [textEditSession?.annotationId])
+    textarea.focus({ preventScroll: true })
+    const end = textarea.value.length
+    textarea.setSelectionRange(end, end)
+  }, [editingId])
 
   useEffect(() => {
-    if (!canvasRef.current || !image) {
-      return
-    }
-
     const canvas = canvasRef.current
-    const context = canvas.getContext('2d')
-    if (!context) {
+    const context = canvas?.getContext('2d')
+    if (!canvas || !context || !image) {
       return
     }
 
-    const scale = window.devicePixelRatio || 1
-    canvas.width = image.naturalWidth * scale
-    canvas.height = image.naturalHeight * scale
-    canvas.style.width = `${image.naturalWidth}px`
-    canvas.style.height = `${image.naturalHeight}px`
+    const dpr = window.devicePixelRatio || 1
+    const width = image.naturalWidth * displayScale
+    const height = image.naturalHeight * displayScale
+    canvas.width = Math.round(width * dpr)
+    canvas.height = Math.round(height * dpr)
+    canvas.style.width = `${width}px`
+    canvas.style.height = `${height}px`
 
-    context.setTransform(scale, 0, 0, scale, 0, 0)
-    context.clearRect(0, 0, image.naturalWidth, image.naturalHeight)
+    context.setTransform(displayScale * dpr, 0, 0, displayScale * dpr, 0, 0)
+    context.imageSmoothingQuality = 'high'
     context.drawImage(image, 0, 0)
-    annotations.forEach((annotation) => {
-      if (
-        annotation.type === 'text' &&
-        annotation.id === textEditSession?.annotationId
-      ) {
-        return
-      }
-
-      drawAnnotation(context, annotation)
-    })
+    annotations.forEach((annotation) => drawAnnotation(context, annotation, measureText))
     if (preview) {
-      drawAnnotation(context, preview)
+      drawAnnotation(context, preview, measureText)
     }
 
-    const selected = annotations.find(
-      (annotation) => annotation.id === selectedId,
-    )
-    if (selected) {
-      drawSelection(context, selected)
+    const hovered = annotations.find((annotation) => annotation.id === hoveredId)
+    if (hovered) {
+      drawHover(context, hovered, measureText, pixel)
     }
-  }, [annotations, image, preview, selectedId, textEditSession?.annotationId])
+
+    const selected = annotations.find((annotation) => annotation.id === selectedId)
+    if (selected && selected.id !== editingId) {
+      drawSelection(context, selected, measureText, pixel)
+    }
+  }, [
+    annotations,
+    displayScale,
+    editingId,
+    hoveredId,
+    image,
+    pixel,
+    preview,
+    selectedId,
+    viewportSize,
+  ])
+
+  useEffect(() => {
+    if (!message) {
+      return
+    }
+
+    const timeout = window.setTimeout(() => setMessage(null), 2500)
+    return () => window.clearTimeout(timeout)
+  }, [message])
+
+  const editingLayout = editingAnnotation
+    ? getTextLayout(editingAnnotation, measureText)
+    : null
 
   return (
     <main className="flex h-dvh flex-col overflow-hidden bg-white text-neutral-950">
@@ -1123,11 +869,13 @@ function App() {
               <Button
                 key={item.id}
                 type="button"
-                variant={tool === item.id ? 'default' : 'outline'}
+                variant={tool === item.id ? 'default' : 'ghost'}
                 size="icon"
                 aria-label={item.label}
-                title={item.label}
-                onClick={() => setTool(item.id)}
+                aria-pressed={tool === item.id}
+                title={`${item.label} (${item.shortcut})`}
+                onMouseDown={keepFocus}
+                onClick={() => selectTool(item.id)}
               >
                 <Icon />
               </Button>
@@ -1135,57 +883,138 @@ function App() {
           })}
         </div>
 
-        <Separator className="hidden h-9 w-px sm:block" data-orientation="vertical" />
+        <Separator className="hidden h-6 w-px sm:block" data-orientation="vertical" />
 
-        <div className="flex items-center gap-2">
-          <Label htmlFor="annotation-color">Color</Label>
-          <Input
-            id="annotation-color"
-            className="h-9 w-14 p-1"
-            type="color"
-            value={color}
-            onChange={(event) => updateSelectedColor(event.target.value)}
-          />
+        <div className="flex items-center gap-1" role="group" aria-label="Color">
+          {swatches.map((swatch) => (
+            <button
+              key={swatch.color}
+              type="button"
+              aria-label={swatch.label}
+              aria-pressed={color === swatch.color}
+              title={swatch.label}
+              className={cn(
+                'size-6 rounded-full border border-black/15 transition-transform active:scale-90',
+                color === swatch.color &&
+                  'ring-2 ring-neutral-950 ring-offset-2 ring-offset-white',
+              )}
+              style={{ background: swatch.color }}
+              onMouseDown={keepFocus}
+              onClick={() => changeColor(swatch.color)}
+            />
+          ))}
+          <label
+            title="Custom color"
+            className={cn(
+              'relative size-6 cursor-pointer overflow-hidden rounded-full border border-black/15',
+              !swatches.some((swatch) => swatch.color === color) &&
+                'ring-2 ring-neutral-950 ring-offset-2 ring-offset-white',
+            )}
+            style={{
+              background:
+                'conic-gradient(#ef4444, #facc15, #22c55e, #3b82f6, #a855f7, #ef4444)',
+            }}
+          >
+            <span className="sr-only">Custom color</span>
+            <input
+              type="color"
+              className="absolute inset-0 cursor-pointer opacity-0"
+              value={color}
+              onChange={(event) =>
+                changeColor(event.target.value, { coalesce: 'color' })
+              }
+            />
+          </label>
         </div>
 
-        {selectedAnnotation?.type === 'text' ? (
-          <Input
-            className="w-48"
-            aria-label="Text"
-            value={selectedAnnotation.text}
-            onChange={(event) => updateSelectedText(event.target.value)}
-          />
+        <Separator className="hidden h-6 w-px sm:block" data-orientation="vertical" />
+
+        <div
+          className="flex items-center rounded-md border border-neutral-200 p-0.5"
+          role="group"
+          aria-label={isTextContext ? 'Text size' : 'Stroke width'}
+          title={isTextContext ? 'Text size' : 'Stroke width'}
+        >
+          {sizeOptions.map((size) => (
+            <button
+              key={size}
+              type="button"
+              aria-pressed={activeSize === size}
+              className={cn(
+                'grid h-7 w-8 place-items-center rounded text-xs font-medium text-neutral-600 hover:bg-neutral-100',
+                activeSize === size && 'bg-neutral-950 text-white hover:bg-neutral-950',
+              )}
+              onMouseDown={keepFocus}
+              onClick={() => changeSize(size)}
+            >
+              {isTextContext ? (
+                size
+              ) : (
+                <span
+                  className="block w-4 rounded-full bg-current"
+                  style={{ height: { S: 1.5, M: 3, L: 5 }[size] }}
+                />
+              )}
+            </button>
+          ))}
+        </div>
+
+        {isTextContext ? (
+          <div
+            className="flex items-center rounded-md border border-neutral-200 p-0.5"
+            role="group"
+            aria-label="Text style"
+          >
+            {(['outline', 'label'] as const).map((style) => (
+              <button
+                key={style}
+                type="button"
+                aria-pressed={textStyle === style}
+                title={style === 'outline' ? 'Outlined text' : 'Text on a label'}
+                className={cn(
+                  'h-7 rounded px-2 text-xs font-medium text-neutral-600 hover:bg-neutral-100',
+                  textStyle === style && 'bg-neutral-950 text-white hover:bg-neutral-950',
+                )}
+                onMouseDown={keepFocus}
+                onClick={() => changeTextStyle(style)}
+              >
+                {style === 'outline' ? 'Outline' : 'Label'}
+              </button>
+            ))}
+          </div>
         ) : null}
+
+        <Separator className="hidden h-6 w-px sm:block" data-orientation="vertical" />
 
         <div className="flex items-center gap-1">
           <Button
             type="button"
-            variant="outline"
+            variant="ghost"
             size="icon"
             aria-label="Undo"
-            title="Undo"
-            disabled={history.length === 0}
+            title="Undo (⌘Z)"
+            disabled={history.past.length === 0 && !textEdit}
             onClick={undo}
           >
             <Undo2 />
           </Button>
           <Button
             type="button"
-            variant="outline"
+            variant="ghost"
             size="icon"
             aria-label="Redo"
-            title="Redo"
-            disabled={redoStack.length === 0}
+            title="Redo (⇧⌘Z)"
+            disabled={history.future.length === 0}
             onClick={redo}
           >
             <Redo2 />
           </Button>
           <Button
             type="button"
-            variant="outline"
+            variant="ghost"
             size="icon"
             aria-label="Delete selected"
-            title="Delete selected"
+            title="Delete selected (⌫)"
             disabled={!selectedId}
             onClick={deleteSelected}
           >
@@ -1196,118 +1025,179 @@ function App() {
         <div className="ml-auto flex items-center gap-1">
           <Button
             type="button"
-            variant="outline"
+            variant="ghost"
+            size="icon"
+            aria-label="Paste image"
+            title="Paste image (⌘V)"
             onClick={() => void pasteFromClipboard()}
           >
             <ClipboardPaste />
-            Paste
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Clear annotations"
+            title="Clear annotations"
+            disabled={annotations.length === 0}
+            onClick={clearAnnotations}
+          >
+            <Eraser />
           </Button>
           <Button
             type="button"
             variant="outline"
+            size="icon"
+            aria-label="Copy image"
+            title="Copy image (⌘C)"
             disabled={!image}
             onClick={() => void copyImage()}
           >
             <ClipboardCopy />
-            Copy
           </Button>
           <Button
             type="button"
-            variant="outline"
             disabled={!image}
+            title="Download (⌘S)"
             onClick={downloadImage}
           >
             <Download />
             Download
           </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={annotations.length === 0}
-            onClick={clearAnnotations}
-          >
-            Clear
-          </Button>
         </div>
       </header>
 
-      <section className="flex min-h-0 flex-1 flex-col">
-        <div className="shrink-0 border-b border-neutral-200 px-3 py-2 text-sm text-neutral-600">
-          {message}
-        </div>
+      <section
+        ref={viewportRef}
+        className="relative grid min-h-0 min-w-0 flex-1 place-items-center overflow-hidden bg-neutral-100 p-6"
+      >
+        {image ? (
+          <div
+            className="relative shadow-sm"
+            style={{
+              width: image.naturalWidth * displayScale,
+              height: image.naturalHeight * displayScale,
+            }}
+          >
+            <canvas
+              ref={canvasRef}
+              className="block touch-none select-none"
+              style={{ cursor }}
+              onDoubleClick={handleDoubleClick}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              onPointerLeave={() => setHoveredId(null)}
+            />
 
-        <div
-          ref={viewportRef}
-          className="grid min-h-0 min-w-0 flex-1 place-items-center overflow-hidden bg-neutral-50 p-4"
-        >
-          {image ? (
-            <div
-              className="relative"
-              style={{
-                width: image.naturalWidth * displayScale,
-                height: image.naturalHeight * displayScale,
-              }}
-            >
-              <div
-                className="absolute left-0 top-0 w-max origin-top-left"
-                style={{ transform: `scale(${displayScale})` }}
-              >
-                <canvas
-                  ref={canvasRef}
-                  className="block cursor-crosshair bg-white"
-                  onDoubleClick={handleCanvasDoubleClick}
-                  onPointerDown={handlePointerDown}
-                  onPointerMove={handlePointerMove}
-                  onPointerUp={handlePointerUp}
-                  onPointerCancel={handlePointerUp}
-                />
-                {selectedTextAnnotation &&
-                inlineTextBounds &&
-                textEditSession?.annotationId === selectedTextAnnotation.id ? (
-                  <Input
-                    ref={inlineTextRef}
-                    aria-label="Edit canvas text"
-                    className="absolute z-10 h-auto rounded-none border-neutral-950 bg-white px-0 py-0 shadow-none focus-visible:ring-0"
-                    style={{
-                      color: selectedTextAnnotation.color,
-                      fontSize: selectedTextAnnotation.fontSize,
-                      height: inlineTextBounds.height,
-                      left: inlineTextBounds.x,
-                      lineHeight: `${inlineTextBounds.height}px`,
-                      minWidth: 48,
-                      top: inlineTextBounds.y,
-                      width: Math.max(inlineTextBounds.width + 16, 80),
-                    }}
-                    value={selectedTextAnnotation.text}
-                    onBlur={finishInlineTextEdit}
-                    onChange={(event) => updateSelectedText(event.target.value)}
+            {editingAnnotation && editingLayout ? (
+              <>
+                <div
+                  className="pointer-events-none absolute left-0 top-0 origin-top-left"
+                  style={{
+                    width: image.naturalWidth,
+                    height: image.naturalHeight,
+                    transform: `scale(${displayScale})`,
+                  }}
+                >
+                  <textarea
+                    ref={textareaRef}
+                    aria-label="Annotation text"
+                    placeholder={textPlaceholder}
+                    wrap="off"
+                    spellCheck={false}
+                    rows={1}
+                    className="pointer-events-auto absolute resize-none overflow-hidden border-0 bg-transparent placeholder:text-[var(--placeholder)] focus:outline-none"
+                    style={
+                      {
+                        '--placeholder':
+                          editingAnnotation.style === 'label'
+                            ? `${getContrastColor(editingAnnotation.color)}99`
+                            : `${editingAnnotation.color}99`,
+                        left: editingLayout.x,
+                        top: editingLayout.y,
+                        width:
+                          Math.max(
+                            editingLayout.width,
+                            measureText(textPlaceholder, editingAnnotation.fontSize) +
+                              editingLayout.padding * 2,
+                          ) + editingAnnotation.fontSize,
+                        height: editingLayout.height,
+                        padding: editingLayout.padding,
+                        font: getTextFont(editingAnnotation.fontSize),
+                        lineHeight: `${editingLayout.lineHeight}px`,
+                        whiteSpace: 'pre',
+                        color: 'transparent',
+                        caretColor:
+                          editingAnnotation.style === 'label'
+                            ? getContrastColor(editingAnnotation.color)
+                            : editingAnnotation.color,
+                        background:
+                          editingAnnotation.style === 'label' &&
+                          editingAnnotation.text.trim() === ''
+                            ? editingAnnotation.color
+                            : 'transparent',
+                        borderRadius: editingAnnotation.fontSize * 0.25,
+                        outline: `${pixel}px dashed #0ea5e9`,
+                        outlineOffset: pixel * 2,
+                      } as React.CSSProperties
+                    }
+                    value={editingAnnotation.text}
+                    onChange={(event) =>
+                      dispatch(
+                        updateTextDraft(current(), editingAnnotation.id, {
+                          text: event.target.value,
+                        }),
+                      )
+                    }
+                    onBlur={finishEditing}
                     onKeyDown={(event) => {
-                      event.stopPropagation()
-                      if (event.key === 'Enter') {
-                        event.currentTarget.blur()
-                      }
                       if (event.key === 'Escape') {
                         event.preventDefault()
-                        revertInlineTextEdit()
+                        cancelEditing()
+                      } else if (
+                        event.key === 'Enter' &&
+                        (event.metaKey || event.ctrlKey)
+                      ) {
+                        event.preventDefault()
+                        finishEditing()
                       }
                     }}
-                    onPointerDown={(event) => event.stopPropagation()}
                   />
-                ) : null}
-              </div>
-            </div>
-          ) : (
-            <div className="flex flex-col items-center gap-3 rounded-md border border-dashed border-neutral-300 bg-white p-6 text-center">
-              <p className="text-sm text-neutral-600">
-                Paste an image to start annotating.
-              </p>
-              <Button type="button" onClick={() => void pasteFromClipboard()}>
-                <ClipboardPaste />
-                Paste image
-              </Button>
-            </div>
-          )}
-        </div>
+                </div>
+                <div
+                  className="pointer-events-none absolute whitespace-nowrap rounded bg-neutral-950/80 px-1.5 py-0.5 text-[11px] text-white"
+                  style={{
+                    left: editingLayout.x * displayScale,
+                    top: (editingLayout.y + editingLayout.height) * displayScale + 12,
+                  }}
+                >
+                  ⌘↵ done · Esc cancel · ↵ new line
+                </div>
+              </>
+            ) : null}
+          </div>
+        ) : (
+          <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-neutral-300 bg-white p-8 text-center">
+            <p className="text-sm text-neutral-600">
+              Paste an image (⌘V) to start annotating.
+            </p>
+            <Button type="button" onClick={() => void pasteFromClipboard()}>
+              <ClipboardPaste />
+              Paste image
+            </Button>
+          </div>
+        )}
+
+        {message ? (
+          <div
+            role="status"
+            className="toast-in pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-neutral-950 px-3 py-2 text-sm text-white shadow-lg"
+          >
+            {message}
+          </div>
+        ) : null}
       </section>
     </main>
   )
