@@ -756,7 +756,51 @@ function App() {
     return () => window.removeEventListener('paste', onPaste)
   }, [loadImageBlob])
 
+  const nudgeSelected = useCallback(
+    (dx: number, dy: number) => {
+      if (!selectedId) {
+        return
+      }
+
+      dispatch({
+        type: 'commit',
+        value: current().map((annotation) =>
+          annotation.id === selectedId
+            ? moveAnnotation(annotation, { x: dx, y: dy })
+            : annotation,
+        ),
+        coalesce: `nudge:${selectedId}`,
+      })
+    },
+    [current, dispatch, selectedId],
+  )
+
+  const duplicateSelected = useCallback(() => {
+    const source = current().find((annotation) => annotation.id === selectedId)
+    if (!source) {
+      return
+    }
+
+    const offset = 16 * pixel
+    const copy = {
+      ...moveAnnotation(source, { x: offset, y: offset }),
+      id: crypto.randomUUID(),
+    }
+    dispatch({ type: 'commit', value: [...current(), copy] })
+    setSelectedId(copy.id)
+  }, [current, dispatch, pixel, selectedId])
+
   useEffect(() => {
+    const toolShortcuts = Object.fromEntries(
+      tools.map((item) => [item.shortcut.toLowerCase(), item.id]),
+    )
+    const arrows: Record<string, [number, number]> = {
+      ArrowLeft: [-1, 0],
+      ArrowRight: [1, 0],
+      ArrowUp: [0, -1],
+      ArrowDown: [0, 1],
+    }
+
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target
       if (
@@ -769,25 +813,76 @@ function App() {
       const modifier = event.metaKey || event.ctrlKey
       const key = event.key.toLowerCase()
 
-      if (modifier && key === 'z') {
-        event.preventDefault()
-        if (event.shiftKey) {
+      if (modifier) {
+        if (key === 'z') {
+          event.preventDefault()
+          if (event.shiftKey) {
+            redo()
+          } else {
+            undo()
+          }
+        } else if (key === 'y') {
+          event.preventDefault()
           redo()
-        } else {
-          undo()
+        } else if (key === 'd') {
+          event.preventDefault()
+          duplicateSelected()
+        } else if (key === 's') {
+          event.preventDefault()
+          downloadImage()
+        } else if (key === 'c' && !window.getSelection()?.toString()) {
+          event.preventDefault()
+          void copyImage()
         }
-      } else if (modifier && key === 'y') {
-        event.preventDefault()
-        redo()
-      } else if (event.key === 'Delete' || event.key === 'Backspace') {
+        return
+      }
+
+      if (event.altKey) {
+        return
+      }
+
+      if (event.key === 'Delete' || event.key === 'Backspace') {
         event.preventDefault()
         deleteSelected()
+      } else if (event.key === 'Escape') {
+        if (selectedId) {
+          setSelectedId(null)
+        } else {
+          setTool('select')
+        }
+      } else if (event.key === 'Enter') {
+        const selected = current().find((annotation) => annotation.id === selectedId)
+        if (selected?.type === 'text') {
+          event.preventDefault()
+          startEditing(selected)
+        }
+      } else if (arrows[event.key]) {
+        if (selectedId) {
+          event.preventDefault()
+          const [dx, dy] = arrows[event.key]
+          const step = (event.shiftKey ? 10 : 1) * pixel
+          nudgeSelected(dx * step, dy * step)
+        }
+      } else if (toolShortcuts[key] && !event.shiftKey) {
+        setTool(toolShortcuts[key])
       }
     }
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [deleteSelected, redo, undo])
+  }, [
+    copyImage,
+    current,
+    deleteSelected,
+    downloadImage,
+    duplicateSelected,
+    nudgeSelected,
+    pixel,
+    redo,
+    selectedId,
+    startEditing,
+    undo,
+  ])
 
   const editingId = textEdit?.id
   useLayoutEffect(() => {
