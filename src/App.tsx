@@ -5,6 +5,7 @@ import {
   ClipboardPaste,
   Download,
   Eraser,
+  FolderOpen,
   Minus,
   MousePointer2,
   Pencil,
@@ -112,6 +113,12 @@ function nearestSize(value: number, presets: Record<SizeOption, number>) {
   )
 }
 
+type Toast = {
+  id: number
+  text: string
+  action?: { label: string; run: () => void }
+}
+
 /** Keeps toolbar clicks from stealing focus from the inline text editor. */
 const keepFocus = (event: React.MouseEvent) => event.preventDefault()
 
@@ -122,7 +129,7 @@ function App() {
   const interactionRef = useRef<Interaction | null>(null)
   const textEditRef = useRef<TextEdit | null>(null)
 
-  const { state: history, dispatch, read } = useHistoryStore<Annotation[]>([])
+  const { state: history, dispatch, read, replace } = useHistoryStore<Annotation[]>([])
   const annotations = history.present
 
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 })
@@ -137,7 +144,21 @@ function App() {
   const [strokeSize, setStrokeSize] = useState<SizeOption>('M')
   const [textSize, setTextSize] = useState<SizeOption>('M')
   const [textStyle, setTextStyle] = useState<TextStyle>('outline')
-  const [message, setMessage] = useState<string | null>(null)
+  const [toast, setToast] = useState<Toast | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const imageRef = useRef<HTMLImageElement | null>(null)
+  useEffect(() => {
+    imageRef.current = image
+  }, [image])
+
+  const openFile = useCallback(() => fileInputRef.current?.click(), [])
+
+  const showToast = useCallback(
+    (text: string, action?: Toast['action']) =>
+      setToast({ id: Date.now(), text, action }),
+    [],
+  )
 
   const setTextEdit = useCallback((next: TextEdit | null) => {
     textEditRef.current = next
@@ -322,21 +343,40 @@ function App() {
       const url = URL.createObjectURL(blob)
       const nextImage = new Image()
       nextImage.onload = () => {
+        URL.revokeObjectURL(url)
+        const previousImage = imageRef.current
+        const previousHistory = read()
+
         setTextEdit(null)
         setImage(nextImage)
         dispatch({ type: 'reset', value: [] })
         setPreview(null)
         setSelectedId(null)
+
+        if (previousImage && previousHistory.present.length > 0) {
+          showToast('Replaced image and its annotations.', {
+            label: 'Undo',
+            run: () => {
+              setTextEdit(null)
+              setSelectedId(null)
+              setImage(previousImage)
+              replace(previousHistory)
+            },
+          })
+        }
       }
-      nextImage.onerror = () => setMessage('Could not read that image.')
+      nextImage.onerror = () => {
+        URL.revokeObjectURL(url)
+        showToast('Could not read that image.')
+      }
       nextImage.src = url
     },
-    [dispatch, setTextEdit],
+    [dispatch, read, replace, setTextEdit, showToast],
   )
 
   const pasteFromClipboard = useCallback(async () => {
     if (!navigator.clipboard?.read) {
-      setMessage('Press ⌘V to paste an image.')
+      showToast('Press ⌘V to paste an image.')
       return
     }
 
@@ -349,11 +389,11 @@ function App() {
           return
         }
       }
-      setMessage('Clipboard does not contain an image.')
+      showToast('Clipboard does not contain an image.')
     } catch {
-      setMessage('Clipboard access was blocked. Press ⌘V instead.')
+      showToast('Clipboard access was blocked. Press ⌘V instead.')
     }
-  }, [loadImageBlob])
+  }, [loadImageBlob, showToast])
 
   const undo = useCallback(() => {
     finishEditing()
@@ -385,7 +425,7 @@ function App() {
     }
 
     if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') {
-      setMessage('Copying images is not supported in this browser.')
+      showToast('Copying images is not supported in this browser.')
       return
     }
 
@@ -398,11 +438,11 @@ function App() {
         ),
       )
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-      setMessage('Copied to clipboard.')
+      showToast('Copied to clipboard.')
     } catch {
-      setMessage('Clipboard copy was blocked.')
+      showToast('Clipboard copy was blocked.')
     }
-  }, [current, finishEditing, image])
+  }, [current, finishEditing, image, showToast])
 
   const downloadImage = useCallback(() => {
     if (!image) {
@@ -414,8 +454,8 @@ function App() {
     link.href = renderImage(image, current(), measureText).toDataURL('image/png')
     link.download = 'annotated-image.png'
     link.click()
-    setMessage('Saved annotated-image.png.')
-  }, [current, finishEditing, image])
+    showToast('Saved annotated-image.png.')
+  }, [current, finishEditing, image, showToast])
 
   const clearAnnotations = useCallback(() => {
     finishEditing()
@@ -830,6 +870,9 @@ function App() {
         } else if (key === 's') {
           event.preventDefault()
           downloadImage()
+        } else if (key === 'o') {
+          event.preventDefault()
+          openFile()
         } else if (key === 'c' && !window.getSelection()?.toString()) {
           event.preventDefault()
           void copyImage()
@@ -877,6 +920,7 @@ function App() {
     downloadImage,
     duplicateSelected,
     nudgeSelected,
+    openFile,
     pixel,
     redo,
     selectedId,
@@ -941,13 +985,32 @@ function App() {
   ])
 
   useEffect(() => {
-    if (!message) {
+    if (!toast) {
       return
     }
 
-    const timeout = window.setTimeout(() => setMessage(null), 2500)
+    const timeout = window.setTimeout(
+      () => setToast(null),
+      toast.action ? 6000 : 2500,
+    )
     return () => window.clearTimeout(timeout)
-  }, [message])
+  }, [toast])
+
+  const handleDrop = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault()
+      setIsDragging(false)
+      const file = Array.from(event.dataTransfer.files).find((entry) =>
+        entry.type.startsWith('image/'),
+      )
+      if (file) {
+        loadImageBlob(file)
+      } else {
+        showToast('Drop an image file.')
+      }
+    },
+    [loadImageBlob, showToast],
+  )
 
   const editingLayout = editingAnnotation
     ? getTextLayout(editingAnnotation, measureText)
@@ -1118,6 +1181,29 @@ function App() {
         </div>
 
         <div className="ml-auto flex items-center gap-1">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0]
+              if (file) {
+                loadImageBlob(file)
+              }
+              event.target.value = ''
+            }}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            aria-label="Open image"
+            title="Open image (⌘O)"
+            onClick={openFile}
+          >
+            <FolderOpen />
+          </Button>
           <Button
             type="button"
             variant="ghost"
@@ -1165,6 +1251,18 @@ function App() {
       <section
         ref={viewportRef}
         className="relative grid min-h-0 min-w-0 flex-1 place-items-center overflow-hidden bg-neutral-100 p-6"
+        onDragOver={(event) => {
+          if (event.dataTransfer.types.includes('Files')) {
+            event.preventDefault()
+            setIsDragging(true)
+          }
+        }}
+        onDragLeave={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+            setIsDragging(false)
+          }
+        }}
+        onDrop={handleDrop}
       >
         {image ? (
           <div
@@ -1276,21 +1374,46 @@ function App() {
         ) : (
           <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-neutral-300 bg-white p-8 text-center">
             <p className="text-sm text-neutral-600">
-              Paste an image (⌘V) to start annotating.
+              Paste (⌘V), drop, or open an image to start annotating.
             </p>
-            <Button type="button" onClick={() => void pasteFromClipboard()}>
-              <ClipboardPaste />
-              Paste image
-            </Button>
+            <div className="flex gap-2">
+              <Button type="button" onClick={() => void pasteFromClipboard()}>
+                <ClipboardPaste />
+                Paste image
+              </Button>
+              <Button type="button" variant="outline" onClick={openFile}>
+                <FolderOpen />
+                Open file
+              </Button>
+            </div>
           </div>
         )}
 
-        {message ? (
+        {isDragging ? (
+          <div className="pointer-events-none absolute inset-3 grid place-items-center rounded-xl border-2 border-dashed border-sky-500 bg-sky-500/10 text-sm font-medium text-sky-700">
+            Drop image to annotate
+          </div>
+        ) : null}
+
+        {toast ? (
           <div
+            key={toast.id}
             role="status"
-            className="toast-in pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-neutral-950 px-3 py-2 text-sm text-white shadow-lg"
+            className="toast-in absolute bottom-4 left-1/2 flex -translate-x-1/2 items-center gap-3 rounded-md bg-neutral-950 px-3 py-2 text-sm text-white shadow-lg"
           >
-            {message}
+            {toast.text}
+            {toast.action ? (
+              <button
+                type="button"
+                className="font-medium text-sky-300 hover:text-sky-200"
+                onClick={() => {
+                  toast.action?.run()
+                  setToast(null)
+                }}
+              >
+                {toast.action.label}
+              </button>
+            ) : null}
           </div>
         ) : null}
       </section>

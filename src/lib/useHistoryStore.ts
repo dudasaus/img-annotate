@@ -22,5 +22,10 @@ export function useHistoryStore<T>(initial: T) {
 
   const read = useCallback(() => stateRef.current, [])
 
-  return { state, dispatch, read }
+  const replace = useCallback((next: HistoryState<T>) => {
+    stateRef.current = next
+    setState(next)
+  }, [])
+
+  return { state, dispatch, read, replace }
 }
